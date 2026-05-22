@@ -1,0 +1,9 @@
+{
+    "files.associations": {
+        "stk_interface.h": "c",
+        "stk_config.h": "c",
+        "stk_private.h": "c",
+        "stk_register.h": "c",
+        "stm32f446xx.h": "c"
+    }
+}
