@@ -1,0 +1,95 @@
+{
+  "project": {
+    "name": "MyNucleof446re",
+    "version": "1.1.0",
+    "description": "IR Record and Playback Application (AC Remote Simulator) for STM32F446RE",
+    "author": "Embedded Expert Mentor",
+    "repository": "https://github.com/example/MyNucleof446re"
+  },
+  "hardware": {
+    "target": {
+      "mcu": "STM32F446RET6",
+      "architecture": "ARM Cortex-M4 with FPU",
+      "flash_kb": 512,
+      "ram_kb": 128
+    },
+    "clock_system": {
+      "hsi_mhz": 16,
+      "hse_mhz": 8,
+      "sysclk_source": "HSI",
+      "ahb_prescaler": 1,
+      "apb1_prescaler": 1,
+      "apb2_prescaler": 1
+    },
+    "pin_mapping": {
+      "IrRxPin": {
+        "port": "A",
+        "pin": 0,
+        "mode": "Input",
+        "function": "HX1838 IR Receiver (EXTI0)",
+        "logic": "Active Low"
+      },
+      "IrTxPin": {
+        "port": "A",
+        "pin": 8,
+        "mode": "Alternate",
+        "alternate_function": 1,
+        "function": "IR Transmitter LED (TIM1_CH1)",
+        "speed": "High"
+      },
+      "UserButton": {
+        "port": "C",
+        "pin": 13,
+        "mode": "Input",
+        "function": "Nucleo User Button",
+        "logic": "Active Low"
+      },
+      "StatusLed": {
+        "port": "A",
+        "pin": 5,
+        "mode": "Output",
+        "function": "Nucleo Green LED",
+        "logic": "Active High"
+      }
+    },
+    "peripherals": {
+      "TIM1": "38kHz Carrier Frequency Generator",
+      "TIM2": "1MHz Microsecond Stopwatch (1us resolution)",
+      "EXTI0": "Edge detection for IR pulse sniffing"
+    }
+  },
+  "application": {
+    "ir_settings": {
+      "max_pulses": 400,
+      "carrier_frequency_hz": 38000,
+      "idle_timeout_us": 50000,
+      "min_valid_pulses": 10
+    },
+    "rtos_tasks": [
+      {
+        "id": 0,
+        "name": "CheckButtonTask",
+        "period_ms": 100,
+        "description": "Polls user button to trigger signal playback"
+      },
+      {
+        "id": 1,
+        "name": "IdleTimeoutTask",
+        "period_ms": 50,
+        "description": "Monitors IR receiver for end-of-transmission"
+      }
+    ]
+  },
+  "build_config": {
+    "toolchain": "arm-none-eabi-gcc",
+    "cpp_standard": "c++11",
+    "optimization_level": "-Og",
+    "linker_scripts": [
+      "STM32F446RETX_FLASH.ld"
+    ],
+    "defines": [
+      "STM32F446xx",
+      "USE_FULL_ASSERT"
+    ]
+  }
+}
