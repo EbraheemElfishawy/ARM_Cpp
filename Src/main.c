@@ -15,7 +15,7 @@
  *
  ******************************************************************************
  */
-
+ 
 #include <stdint.h>
 #include "../Inc/MCAL_RCC_INC/RCC_interface.h"
 #include "../Inc/MCAL_GPIO_INC/GPIO_interface.h"
