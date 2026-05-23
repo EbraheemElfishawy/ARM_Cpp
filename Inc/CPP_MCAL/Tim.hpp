@@ -32,10 +32,12 @@ namespace MCAL {
         static void InitStopwatch() {
             EnableTim2();
             MCU::TIM2->CR1 = 0;
-            // Prescaler: (16MHz / 16) = 1MHz -> 1 tick = 1us.
+            // On F446RE, if AHB=16MHz and APB1 prescaler=1, TIM2 clock is 16MHz.
+            // PSC = 16-1 results in 1MHz timer clock (1us per tick).
             MCU::TIM2->PSC = 16 - 1;
-            MCU::TIM2->ARR = 0xFFFFFFFF; // Free running 32-bit counter
-            MCU::TIM2->CR1 |= (1 << 0);  // Enable counter
+            MCU::TIM2->ARR = 0xFFFFFFFF; 
+            MCU::TIM2->CNT = 0;
+            MCU::TIM2->CR1 |= (1 << 0);  
         }
 
         static uint32_t GetStopwatchValue() {
@@ -59,8 +61,8 @@ namespace MCAL {
             MCU::TIM1->PSC = 0;
             MCU::TIM1->ARR = 421 - 1;
             
-            // 50% duty cycle for maximum IR power output
-            MCU::TIM1->CCR1 = 421 / 2;
+            // 33% duty cycle (1/3) - Standard mark-to-space ratio for NEC protocol
+            MCU::TIM1->CCR1 = 421 / 3;
 
             // Configure CH1 in PWM Mode 1
             MCU::TIM1->CCMR1 &= ~(0xFF);

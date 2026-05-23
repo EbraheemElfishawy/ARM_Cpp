@@ -22,6 +22,10 @@ namespace MCU {
         uint32_t Reserved2;
         volatile uint32_t APB1ENR;
         volatile uint32_t APB2ENR;
+        uint32_t Reserved3[2];
+        volatile uint32_t LPAM1ENR;
+        uint32_t Reserved4[2];
+        volatile uint32_t CSR; // Clock control & status register (Contains Reset Flags)
     };
 
     struct GPIO_Regs {
@@ -85,9 +89,20 @@ namespace MCU {
         volatile uint32_t OR;
     };
 
+    struct USART_Regs {
+        volatile uint32_t SR;
+        volatile uint32_t DR;
+        volatile uint32_t BRR;
+        volatile uint32_t CR1;
+        volatile uint32_t CR2;
+        volatile uint32_t CR3;
+        volatile uint32_t GTPR;
+    };
+
     inline EXTI_Regs*   const EXTI   = reinterpret_cast<EXTI_Regs*>(0x40013C00);
     inline SYSCFG_Regs* const SYSCFG = reinterpret_cast<SYSCFG_Regs*>(0x40013800);
     inline TIM_Regs*    const TIM1   = reinterpret_cast<TIM_Regs*>(0x40010000);
     inline TIM_Regs*    const TIM2   = reinterpret_cast<TIM_Regs*>(0x40000000);
+    inline USART_Regs*  const USART2 = reinterpret_cast<USART_Regs*>(0x40004400);
 
 }

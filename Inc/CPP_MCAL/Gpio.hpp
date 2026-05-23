@@ -43,9 +43,21 @@ namespace MCAL {
             p->OSPEEDR |= (3UL << (pin * 2)); // 11: High speed
         }
         
+        static void SetPullUp() {
+            auto p = GetPort();
+            p->PUPDR &= ~(3UL << (pin * 2));
+            p->PUPDR |= (1UL << (pin * 2)); // 01: Pull-up
+        }
+
+        static void SetPullDown() {
+            auto p = GetPort();
+            p->PUPDR &= ~(3UL << (pin * 2));
+            p->PUPDR |= (2UL << (pin * 2)); // 10: Pull-down
+        }
+
         static void Toggle() {
             auto p = GetPort();
-            p->ODR ^= (1UL << pin);
+            p->ODR ^= (1 << pin);
         }
         
         static void SetHigh() {

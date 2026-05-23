@@ -30,11 +30,12 @@ namespace MCAL {
         }
 
         static void DelayMs(uint32_t ms) {
-            MCU::STK->CTRL &= ~(1 << 0);
-            MCU::STK->LOAD = ms * 2000; // Simplistic approximation
-            MCU::STK->VAL = 0;
-            MCU::STK->CTRL |= (1 << 0);
-            while (MCU::STK->VAL != 0) {}
+            // Calibrated for ~16MHz HSI clock
+            for (uint32_t i = 0; i < ms; i++) {
+                for (volatile uint32_t j = 0; j < 2000; j++) {
+                    __asm("nop");
+                }
+            }
         }
     };
 }

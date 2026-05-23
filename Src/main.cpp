@@ -1,7 +1,7 @@
 /**
  ******************************************************************************
  * @file           : main.cpp
- * @brief          : IR Record and Playback Application (AC Remote Simulator)
+ * @brief          : IR Protocol Analyzer (AC Receiver Simulator) - LONG CAPTURE
  * @author         : Embedded Expert Mentor
  ******************************************************************************
  */
@@ -15,158 +15,192 @@
 #include "../Inc/CPP_MCAL/Syscfg.hpp"
 #include "../Inc/CPP_MCAL/Tim.hpp"
 #include "../Inc/CPP_RTOS/Rtos.hpp"
+#include "../Inc/CPP_MCAL/Usart.hpp"
 
 // ----------------------------------------------------------------------------
 // Pin Definitions
 // ----------------------------------------------------------------------------
-using IrRxPin    = MCAL::GpioPin<MCAL::Port::A, 0>;  // HX1838 Receiver (EXTI0)
-using IrTxPin    = MCAL::GpioPin<MCAL::Port::A, 8>;  // IR Transmitter LED (TIM1_CH1)
-using UserButton = MCAL::GpioPin<MCAL::Port::C, 13>; // Nucleo Blue Button
-using StatusLed  = MCAL::GpioPin<MCAL::Port::A, 5>;  // Nucleo Green LED
+using IrRxPin    = MCAL::GpioPin<MCAL::Port::A, 0>;  
+using IrTxPin    = MCAL::GpioPin<MCAL::Port::A, 8>;  
+using UserButton = MCAL::GpioPin<MCAL::Port::C, 13>; 
+using StatusLed  = MCAL::GpioPin<MCAL::Port::A, 5>;  
 
 // ----------------------------------------------------------------------------
-// Global IR Buffer (The "Memory" of the AC Remote)
+// Global IR Buffer - Increased to 1500 for complex AC frames
 // ----------------------------------------------------------------------------
-constexpr uint16_t MAX_IR_PULSES = 400; // AC remotes can have 100+ bit frames
+constexpr uint16_t MAX_IR_PULSES = 1500; 
 volatile uint32_t irBuffer[MAX_IR_PULSES];
 volatile uint16_t irPulseCount = 0;
-volatile bool isRecording = false;
-volatile bool hasRecordedSignal = false;
 
-// ----------------------------------------------------------------------------
-// Blocking Microsecond Delay (Safe to use ONLY during playback, not sniffing)
-// ----------------------------------------------------------------------------
+enum class SnifferState { IDLE, RECORDING, CAPTURED };
+volatile SnifferState snifferState = SnifferState::IDLE;
+volatile uint32_t deafTimer = 0; 
+
+extern "C" {
+    void SystemInit(void) {
+        volatile uint32_t* CPACR = (volatile uint32_t*)0xE000ED88;
+        *CPACR |= ((3UL << 20) | (3UL << 22)); 
+        volatile uint32_t* VTOR = (volatile uint32_t*)0xE000ED08;
+        *VTOR = 0x08000000;
+    }
+}
+
 void DelayMicroseconds(uint32_t us) {
     MCAL::TimManager::ResetStopwatch();
     while(MCAL::TimManager::GetStopwatchValue() < us) {}
 }
 
-// ----------------------------------------------------------------------------
-// 1. The Sniffer (Record Logic) - Runs in EXTI Interrupt
-// ----------------------------------------------------------------------------
+void DecodeIrSignal() {
+    LOG("--- AC SIGNAL MICROSCOPE ---");
+    if (irPulseCount < 20) return;
+
+    LOG_VAL("Total Pulses Captured", irPulseCount);
+
+    // Log the first 20 spaces to find the 0/1 threshold
+    LOG("Raw Space Timings (us):");
+    for (uint16_t i = 1; i < 41; i += 2) {
+        LOG_VAL(" S", irBuffer[i]);
+    }
+
+    uint8_t currentByte = 0;
+    uint8_t bitIndex = 0;
+    LOG("Binary Data: ");
+
+    for (uint16_t i = 2; i < irPulseCount - 1; i += 2) {
+        uint32_t space = irBuffer[i+1];
+        if (space > 10000) { LOG(" [GAP] "); continue; }
+
+        // Temporary threshold for viewing
+        bool bit = (space > 1000); 
+        MCAL::UsartManager::SendChar(bit ? '1' : '0');
+
+        bitIndex++;
+        if (bitIndex % 8 == 0) MCAL::UsartManager::SendChar(' ');
+    }
+    LOG("\r\n--- End of Analysis ---");
+}
+
 void OnIrPulseEdge() {
-    // 1. Read how long the previous state lasted
     uint32_t duration = MCAL::TimManager::GetStopwatchValue();
     MCAL::TimManager::ResetStopwatch();
 
-    // 2. State Machine Logic
-    // If the duration is massive (>50ms), it means the remote was idle.
-    // The current edge is the START of a new transmission.
-    if (duration > 50000) {
+    if (deafTimer > 0) return;
+    if (snifferState == SnifferState::CAPTURED) return;
+
+    if (snifferState == SnifferState::IDLE) {
         irPulseCount = 0;
-        isRecording = true;
-        hasRecordedSignal = false;
-        StatusLed::SetHigh(); // Turn on LED to indicate recording started
+        snifferState = SnifferState::RECORDING;
+        StatusLed::SetHigh();
     } 
-    // If we are actively recording and haven't run out of memory...
-    else if (isRecording && irPulseCount < MAX_IR_PULSES) {
-        // The HX1838 is ACTIVE LOW. 
-        // Index 0: Duration of the Mark (Time between Falling and Rising edge)
-        // Index 1: Duration of the Space (Time between Rising and Falling edge)
-        irBuffer[irPulseCount++] = duration;
+    else if (snifferState == SnifferState::RECORDING) {
+        if (duration < 50) return; 
+        if (irPulseCount < MAX_IR_PULSES) {
+            irBuffer[irPulseCount++] = duration;
+        }
     }
 }
 
-// ----------------------------------------------------------------------------
-// 2. The Transmitter (Playback Logic)
-// ----------------------------------------------------------------------------
 void PlayIrSignal() {
-    if (irPulseCount == 0) return; // Nothing to play
+    if (irPulseCount == 0) return;
+    LOG_VAL("TX Start", irPulseCount);
+    StatusLed::SetHigh();
+    MCAL::NvicManager::DisableInterrupt(6); 
+    MCU::STK->CTRL &= ~(1 << 1); 
 
-    StatusLed::SetLow(); // Blink LED off during transmission
-
-    // IMPORTANT: Disable receiver AND the RTOS SysTick to guarantee 
-    // microsecond-perfect timing without context-switching interruptions!
-    MCAL::NvicManager::DisableInterrupt(6);  // Disable EXTI0
-    MCAL::NvicManager::DisableInterrupt(-1); // Disable SysTick (Core Exception)
-
-    // Replay the recorded timings
     for(uint16_t i = 0; i < irPulseCount; i++) {
-        if (i % 2 == 0) {
-            // Even Indices are "Marks". Turn on the 38kHz PWM.
-            MCAL::TimManager::StartPwm();
-        } else {
-            // Odd Indices are "Spaces". Turn off the PWM (Silence).
-            MCAL::TimManager::StopPwm();
-        }
-        // Wait for the exact recorded duration
+        if (i % 2 == 0) MCAL::TimManager::StartPwm();
+        else MCAL::TimManager::StopPwm();
         DelayMicroseconds(irBuffer[i]);
     }
     
-    // Ensure the transmitter is fully OFF at the end of the frame
     MCAL::TimManager::StopPwm();
-
-    // Re-enable interrupts
     MCAL::Exti::ClearPending(0);
     MCAL::NvicManager::EnableInterrupt(6);
-    MCAL::NvicManager::EnableInterrupt(-1); // Re-enable SysTick
-    
-    StatusLed::SetHigh(); // LED back on
+    MCU::STK->CTRL |= (1 << 1); 
+    StatusLed::SetLow();
+    deafTimer = 500; 
 }
 
-// ----------------------------------------------------------------------------
-// RTOS Tasks
-// ----------------------------------------------------------------------------
 void CheckButtonTask() {
-    // The Nucleo user button is ACTIVE LOW (pulled high externally)
-    // If pressed, play back the recorded signal!
-    if (UserButton::Read() == false) {
-        if (irPulseCount > 0) {
-            PlayIrSignal();
+    static bool lastButtonState = true;
+    static uint32_t pressTime = 0;
+    bool currentButtonState = UserButton::Read();
+
+    if (currentButtonState == false) {
+        pressTime += 100;
+        if (pressTime >= 2000) {
+            snifferState = SnifferState::IDLE;
+            irPulseCount = 0;
+            LOG("CLEARED.");
+            for(int i=0; i<6; i++) { StatusLed::Toggle(); MCAL::SysTick::DelayMs(50); }
+            pressTime = 0;
         }
+    } else {
+        if (lastButtonState == false && pressTime < 2000) {
+            if (snifferState == SnifferState::CAPTURED) PlayIrSignal();
+            else LOG("READY.");
+        }
+        pressTime = 0;
     }
+    lastButtonState = currentButtonState;
 }
 
 void IdleTimeoutTask() {
-    // If we were recording, and a long time has passed since the last edge,
-    // the transmission is completely finished.
-    if (isRecording && MCAL::TimManager::GetStopwatchValue() > 50000) {
-        isRecording = false;
-        if (irPulseCount > 10) { 
-            hasRecordedSignal = true; // Signal successfully captured!
-            StatusLed::SetLow(); // Turn off LED to indicate ready
+    if (snifferState == SnifferState::RECORDING && irPulseCount > 10) {
+        if (MCAL::TimManager::GetStopwatchValue() > 1000000) {
+            snifferState = SnifferState::CAPTURED;
+            StatusLed::SetLow();
+            DecodeIrSignal();
         }
     }
+    if (deafTimer > 0) {
+        if (deafTimer >= 50) deafTimer -= 50;
+        else deafTimer = 0;
+    }
+}
+
+void HeartbeatTask() {
+    if (snifferState == SnifferState::IDLE) StatusLed::Toggle();
+    else if (snifferState == SnifferState::CAPTURED) StatusLed::SetLow();
 }
 
 int main()
 {
-    // --- Clock Initialization ---
+    MCU::RCC->AHB1ENR |= (1 << 0);
+    MCU::GPIOA->MODER &= ~(3UL << 10);
+    MCU::GPIOA->MODER |= (1UL << 10);
+    MCU::GPIOA->BSRR = (1UL << 5); 
+
     MCAL::RccManager::EnableHSI();
+    MCAL::TimManager::InitStopwatch(); 
+    MCAL::UsartManager::InitLogging(); 
+    
+    LOG("--- AC ANALYZER BOOTED ---");
+    MCU::RCC->CSR |= (1 << 24); 
+
     MCAL::RccManager::EnablePortA();
     MCAL::RccManager::EnablePortC();
     MCAL::SyscfgManager::EnableClock();
 
-    // --- GPIO Setup ---
     StatusLed::SetMode(MCAL::Mode::Output);
-    StatusLed::SetLow();
-    
-    UserButton::SetMode(MCAL::Mode::Input); // PC13 Input
-    
-    IrTxPin::SetMode(MCAL::Mode::Alternate); // PA8 PWM
+    UserButton::SetMode(MCAL::Mode::Input); 
+    IrTxPin::SetMode(MCAL::Mode::Alternate); 
     IrTxPin::SetAlternateFunction(1); 
-    IrTxPin::SetHighSpeed(); // Maximize edge sharpness for PWM
-    
-    IrRxPin::SetMode(MCAL::Mode::Input); // PA0 Receiver
+    IrTxPin::SetHighSpeed(); 
+    IrRxPin::SetMode(MCAL::Mode::Input); 
+    IrRxPin::SetPullUp(); 
 
-    // --- EXTI Setup ---
-    MCAL::SyscfgManager::RouteExtiLine(0, 0); // PA0 -> EXTI0
+    MCAL::SyscfgManager::RouteExtiLine(0, 0); 
     MCAL::Exti::ConfigureLine(0, MCAL::Trigger::Both);
     MCAL::Exti::RegisterCallback(0, OnIrPulseEdge);
     MCAL::NvicManager::EnableInterrupt(6); 
+    MCAL::TimManager::InitPwm38kHz();  
 
-    // --- Timers Setup ---
-    MCAL::TimManager::InitStopwatch(); // TIM2 at 1MHz (1us precision)
-    MCAL::TimManager::InitPwm38kHz();  // TIM1 at 38kHz (Output disabled initially)
-
-    // --- RTOS Setup ---
-    RTOS::Scheduler::CreateTask(0, 100, &CheckButtonTask); // Check button every 100ms
-    RTOS::Scheduler::CreateTask(1, 50,  &IdleTimeoutTask); // Check for IR timeout every 50ms
+    RTOS::Scheduler::CreateTask(0, 100, &CheckButtonTask); 
+    RTOS::Scheduler::CreateTask(1, 50,  &IdleTimeoutTask); 
+    RTOS::Scheduler::CreateTask(2, 500, &HeartbeatTask);   
     RTOS::Scheduler::Start();
 
-    // --- Sleep ---
-    for(;;)
-    {
-        __asm("wfi"); 
-    }
+    StatusLed::SetLow();
+    for(;;) { __asm("wfi"); }
 }
