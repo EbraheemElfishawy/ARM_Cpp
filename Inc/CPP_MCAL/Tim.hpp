@@ -29,6 +29,24 @@ namespace MCAL {
          * @brief Configures TIM2 as a 1-microsecond precision stopwatch.
          * Assumes HSI is the system clock (16 MHz).
          */
+        static void EnableTim5() {
+            MCU::RCC->APB1ENR |= (1 << 3); // TIM5EN
+        }
+
+        static void InitDelayTimer() {
+            EnableTim5();
+            MCU::TIM5->CR1 = 0;
+            MCU::TIM5->PSC = 16 - 1; // 1us per tick
+            MCU::TIM5->ARR = 0xFFFFFFFF; // 32-bit max
+            MCU::TIM5->CNT = 0;
+            MCU::TIM5->CR1 |= (1 << 0);
+        }
+
+        static void WaitUs(uint32_t us) {
+            MCU::TIM5->CNT = 0;
+            while(MCU::TIM5->CNT < us);
+        }
+
         static void InitStopwatch() {
             EnableTim2();
             MCU::TIM2->CR1 = 0;

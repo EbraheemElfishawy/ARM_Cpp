@@ -40,9 +40,19 @@ namespace MCAL {
             // 4. Small delay to let pins stabilize
             for(volatile int i=0; i<1000; i++);
 
-            // 5. Enable Transmitter and USART
+            // 5. Enable Transmitter, Receiver and USART
             MCU::USART2->CR1 |= (1 << 3);  // TE: Transmitter Enable
+            MCU::USART2->CR1 |= (1 << 2);  // RE: Receiver Enable
             MCU::USART2->CR1 |= (1 << 13); // UE: USART Enable
+        }
+
+        static bool DataAvailable() {
+            return (MCU::USART2->SR & (1 << 5)); // RXNE bit
+        }
+
+        static char ReceiveChar() {
+            while (!DataAvailable()) {}
+            return (char)MCU::USART2->DR;
         }
 
         static void SendChar(char c) {

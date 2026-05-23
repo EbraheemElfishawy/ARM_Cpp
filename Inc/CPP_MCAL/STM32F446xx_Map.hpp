@@ -103,6 +103,9 @@ namespace MCU {
     inline SYSCFG_Regs* const SYSCFG = reinterpret_cast<SYSCFG_Regs*>(0x40013800);
     inline TIM_Regs*    const TIM1   = reinterpret_cast<TIM_Regs*>(0x40010000);
     inline TIM_Regs*    const TIM2   = reinterpret_cast<TIM_Regs*>(0x40000000);
+    inline TIM_Regs*    const TIM3   = reinterpret_cast<TIM_Regs*>(0x40000400);
+    inline TIM_Regs*    const TIM4   = reinterpret_cast<TIM_Regs*>(0x40000800);
+    inline TIM_Regs*    const TIM5   = reinterpret_cast<TIM_Regs*>(0x40000C00);
     inline USART_Regs*  const USART2 = reinterpret_cast<USART_Regs*>(0x40004400);
 
 }

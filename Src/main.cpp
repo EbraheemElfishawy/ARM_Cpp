@@ -1,7 +1,7 @@
 /**
  ******************************************************************************
  * @file           : main.cpp
- * @brief          : IR Protocol Analyzer (AC Receiver Simulator) - LONG CAPTURE
+ * @brief          : Professional AC Cloner - HARDWARE TIMED STABLE
  * @author         : Embedded Expert Mentor
  ******************************************************************************
  */
@@ -17,24 +17,21 @@
 #include "../Inc/CPP_RTOS/Rtos.hpp"
 #include "../Inc/CPP_MCAL/Usart.hpp"
 
-// ----------------------------------------------------------------------------
-// Pin Definitions
-// ----------------------------------------------------------------------------
 using IrRxPin    = MCAL::GpioPin<MCAL::Port::A, 0>;  
 using IrTxPin    = MCAL::GpioPin<MCAL::Port::A, 8>;  
 using UserButton = MCAL::GpioPin<MCAL::Port::C, 13>; 
 using StatusLed  = MCAL::GpioPin<MCAL::Port::A, 5>;  
+using VerifyLed  = MCAL::GpioPin<MCAL::Port::C, 0>;  
 
-// ----------------------------------------------------------------------------
-// Global IR Buffer - Increased to 1500 for complex AC frames
-// ----------------------------------------------------------------------------
 constexpr uint16_t MAX_IR_PULSES = 1500; 
-volatile uint32_t irBuffer[MAX_IR_PULSES];
-volatile uint16_t irPulseCount = 0;
+volatile uint32_t bufferON[MAX_IR_PULSES], bufferOFF[MAX_IR_PULSES], bufferSniff[MAX_IR_PULSES];
+volatile uint16_t countON = 0, countOFF = 0, countSniff = 0;
 
-enum class SnifferState { IDLE, RECORDING, CAPTURED };
-volatile SnifferState snifferState = SnifferState::IDLE;
+enum class AppMode { AWAITING_ON, RECORDING_ON, AWAITING_OFF, RECORDING_OFF, READY, VERIFYING };
+volatile AppMode appMode = AppMode::AWAITING_ON;
 volatile uint32_t deafTimer = 0; 
+volatile bool nextPlayIsON = true; 
+volatile bool triggerPlayback = false;
 
 extern "C" {
     void SystemInit(void) {
@@ -45,162 +42,133 @@ extern "C" {
     }
 }
 
-void DelayMicroseconds(uint32_t us) {
-    MCAL::TimManager::ResetStopwatch();
-    while(MCAL::TimManager::GetStopwatchValue() < us) {}
+// ----------------------------------------------------------------------------
+// PWM-Compatible Bit Extraction
+// ----------------------------------------------------------------------------
+uint16_t ExtractBits(volatile uint32_t* buffer, uint16_t count, uint8_t* bitBuffer) {
+    if (count < 10) return 0;
+    uint16_t bIdx = 0;
+    for (uint16_t i = 3; i < count - 1; i += 2) {
+        uint32_t p = buffer[i];
+        uint32_t s = buffer[i+1];
+        bitBuffer[bIdx++] = (p > 15000 || s > 15000) ? 1 : 0;
+        if (bIdx >= 200) break;
+    }
+    return bIdx;
 }
 
-void DecodeIrSignal() {
-    LOG("--- AC SIGNAL MICROSCOPE ---");
-    if (irPulseCount < 20) return;
-
-    LOG_VAL("Total Pulses Captured", irPulseCount);
-
-    // Log the first 20 spaces to find the 0/1 threshold
-    LOG("Raw Space Timings (us):");
-    for (uint16_t i = 1; i < 41; i += 2) {
-        LOG_VAL(" S", irBuffer[i]);
+void LogSignalData(const char* label, volatile uint32_t* buffer, uint16_t count) {
+    MCAL::UsartManager::SendString("\r\n--- SIGNAL: ");
+    MCAL::UsartManager::SendString(label);
+    MCAL::UsartManager::SendString(" ---\r\n");
+    LOG_VAL("Pulses", count);
+    uint8_t bits[200];
+    uint16_t n = ExtractBits(buffer, count, bits);
+    if (n > 0) {
+        MCAL::UsartManager::SendString("Bits (LSB First): ");
+        for(uint16_t i=0; i<n; i++) {
+            MCAL::UsartManager::SendChar(bits[i] ? '1' : '0');
+            if ((i+1)%8 == 0) MCAL::UsartManager::SendChar(' ');
+        }
+        MCAL::UsartManager::SendString("\r\n");
     }
+    MCAL::UsartManager::SendString("------------------------------------\r\n");
+}
 
-    uint8_t currentByte = 0;
-    uint8_t bitIndex = 0;
-    LOG("Binary Data: ");
-
-    for (uint16_t i = 2; i < irPulseCount - 1; i += 2) {
-        uint32_t space = irBuffer[i+1];
-        if (space > 10000) { LOG(" [GAP] "); continue; }
-
-        // Temporary threshold for viewing
-        bool bit = (space > 1000); 
-        MCAL::UsartManager::SendChar(bit ? '1' : '0');
-
-        bitIndex++;
-        if (bitIndex % 8 == 0) MCAL::UsartManager::SendChar(' ');
-    }
-    LOG("\r\n--- End of Analysis ---");
+bool VerifySignal(bool wasON) {
+    volatile uint32_t* orig = wasON ? bufferON : bufferOFF; 
+    uint16_t oCnt = wasON ? countON : countOFF;
+    if (oCnt == 0 || countSniff == 0) return false;
+    uint8_t bitsO[200], bitsS[200];
+    uint16_t nO = ExtractBits(orig, oCnt, bitsO);
+    uint16_t nS = ExtractBits(bufferSniff, countSniff, bitsS);
+    if (nO == 0 || nS == 0) return false;
+    uint16_t matches = 0, limit = (nO < nS) ? nO : nS;
+    for(uint16_t i=0; i<limit; i++) { if (bitsO[i] == bitsS[i]) matches++; }
+    uint16_t score = (matches * 100) / limit;
+    LOG_VAL("Bit-Match Accuracy (%)", score);
+    return (score >= 90);
 }
 
 void OnIrPulseEdge() {
     uint32_t duration = MCAL::TimManager::GetStopwatchValue();
     MCAL::TimManager::ResetStopwatch();
-
     if (deafTimer > 0) return;
-    if (snifferState == SnifferState::CAPTURED) return;
-
-    if (snifferState == SnifferState::IDLE) {
-        irPulseCount = 0;
-        snifferState = SnifferState::RECORDING;
-        StatusLed::SetHigh();
-    } 
-    else if (snifferState == SnifferState::RECORDING) {
-        if (duration < 50) return; 
-        if (irPulseCount < MAX_IR_PULSES) {
-            irBuffer[irPulseCount++] = duration;
-        }
-    }
+    if (appMode == AppMode::AWAITING_ON) { countON = 0; appMode = AppMode::RECORDING_ON; StatusLed::SetHigh(); } 
+    else if (appMode == AppMode::AWAITING_OFF) { countOFF = 0; appMode = AppMode::RECORDING_OFF; StatusLed::SetHigh(); }
+    else if (appMode == AppMode::VERIFYING) { if (duration > 10 && countSniff < MAX_IR_PULSES) bufferSniff[countSniff++] = duration; }
+    else if (appMode == AppMode::RECORDING_ON) { if (duration > 50 && countON < MAX_IR_PULSES) bufferON[countON++] = duration; }
+    else if (appMode == AppMode::RECORDING_OFF) { if (duration > 50 && countOFF < MAX_IR_PULSES) bufferOFF[countOFF++] = duration; }
 }
 
-void PlayIrSignal() {
-    if (irPulseCount == 0) return;
-    LOG_VAL("TX Start", irPulseCount);
-    StatusLed::SetHigh();
-    MCAL::NvicManager::DisableInterrupt(6); 
-    MCU::STK->CTRL &= ~(1 << 1); 
+void PlayStoredSignal(bool useON) {
+    volatile uint32_t* buffer = useON ? bufferON : bufferOFF;
+    uint16_t count = useON ? countON : countOFF;
+    if (count == 0) return;
 
-    for(uint16_t i = 0; i < irPulseCount; i++) {
-        if (i % 2 == 0) MCAL::TimManager::StartPwm();
-        else MCAL::TimManager::StopPwm();
-        DelayMicroseconds(irBuffer[i]);
-    }
+    if (useON) { LOG("TX: Sending [ON]..."); } else { LOG("TX: Sending [OFF]..."); }
     
+    appMode = AppMode::VERIFYING; countSniff = 0; MCAL::TimManager::ResetStopwatch(); StatusLed::SetHigh();
+    MCU::STK->CTRL &= ~(1 << 1); 
+    for(uint16_t i = 0; i < count; i++) {
+        if (i % 2 == 0) MCAL::TimManager::StartPwm(); else MCAL::TimManager::StopPwm();
+        MCAL::TimManager::WaitUs(buffer[i]); // TIM5 Hardware Precision
+    }
     MCAL::TimManager::StopPwm();
-    MCAL::Exti::ClearPending(0);
-    MCAL::NvicManager::EnableInterrupt(6);
     MCU::STK->CTRL |= (1 << 1); 
     StatusLed::SetLow();
-    deafTimer = 500; 
+
+    MCAL::SysTick::DelayMs(400); 
+    LogSignalData("LOOPBACK SAMPLE", bufferSniff, countSniff);
+    if (VerifySignal(useON)) {
+        LOG("[VERIFY] BIT-MATCH SUCCESS!"); VerifyLed::SetHigh(); MCAL::SysTick::DelayMs(1000); VerifyLed::SetLow();
+    } else {
+        LOG("[VERIFY] BIT-MATCH FAILED!"); for(int i=0; i<10; i++) { VerifyLed::Toggle(); MCAL::SysTick::DelayMs(50); }
+    }
+    appMode = AppMode::READY; deafTimer = 500;
 }
 
 void CheckButtonTask() {
-    static bool lastButtonState = true;
-    static uint32_t pressTime = 0;
-    bool currentButtonState = UserButton::Read();
-
-    if (currentButtonState == false) {
-        pressTime += 100;
-        if (pressTime >= 2000) {
-            snifferState = SnifferState::IDLE;
-            irPulseCount = 0;
-            LOG("CLEARED.");
-            for(int i=0; i<6; i++) { StatusLed::Toggle(); MCAL::SysTick::DelayMs(50); }
-            pressTime = 0;
-        }
-    } else {
-        if (lastButtonState == false && pressTime < 2000) {
-            if (snifferState == SnifferState::CAPTURED) PlayIrSignal();
-            else LOG("READY.");
-        }
-        pressTime = 0;
-    }
-    lastButtonState = currentButtonState;
+    static bool last = true; bool cur = UserButton::Read();
+    bool trigger = (cur == false && last == true);
+    if (MCAL::UsartManager::DataAvailable() && MCAL::UsartManager::ReceiveChar() == 'p') trigger = true;
+    if (trigger && appMode == AppMode::READY) triggerPlayback = true;
+    last = cur;
 }
 
 void IdleTimeoutTask() {
-    if (snifferState == SnifferState::RECORDING && irPulseCount > 10) {
-        if (MCAL::TimManager::GetStopwatchValue() > 1000000) {
-            snifferState = SnifferState::CAPTURED;
-            StatusLed::SetLow();
-            DecodeIrSignal();
-        }
+    if (MCAL::TimManager::GetStopwatchValue() > 1000000) {
+        if (appMode == AppMode::RECORDING_ON) { appMode = AppMode::AWAITING_OFF; StatusLed::SetLow(); LogSignalData("REMOTE [ON]", bufferON, countON); LOG("Next: [OFF]..."); } 
+        else if (appMode == AppMode::RECORDING_OFF) { appMode = AppMode::READY; StatusLed::SetLow(); LogSignalData("REMOTE [OFF]", bufferOFF, countOFF); LOG("=== READY TO TOGGLE ==="); }
     }
-    if (deafTimer > 0) {
-        if (deafTimer >= 50) deafTimer -= 50;
-        else deafTimer = 0;
-    }
+    if (deafTimer > 0) { if (deafTimer >= 50) deafTimer -= 50; else deafTimer = 0; }
 }
 
 void HeartbeatTask() {
-    if (snifferState == SnifferState::IDLE) StatusLed::Toggle();
-    else if (snifferState == SnifferState::CAPTURED) StatusLed::SetLow();
+    static uint16_t counter = 0; static uint32_t uptime = 0;
+    counter++;
+    if (counter % 40 == 0) { uptime += 2; LOG_VAL("System Ping (s)", uptime); }
+    if (appMode == AppMode::AWAITING_ON) { if (counter % 10 == 0) StatusLed::Toggle(); }
+    else if (appMode == AppMode::AWAITING_OFF) { if (counter % 2 == 0) StatusLed::Toggle(); }
+    else if (appMode == AppMode::READY) {
+        uint16_t p = counter % 20;
+        if (nextPlayIsON) { if (p == 0) StatusLed::SetHigh(); if (p == 2) StatusLed::SetLow(); } 
+        else { if (p == 0 || p == 4) StatusLed::SetHigh(); if (p == 2 || p == 6) StatusLed::SetLow(); }
+    }
 }
 
-int main()
-{
-    MCU::RCC->AHB1ENR |= (1 << 0);
-    MCU::GPIOA->MODER &= ~(3UL << 10);
-    MCU::GPIOA->MODER |= (1UL << 10);
-    MCU::GPIOA->BSRR = (1UL << 5); 
-
-    MCAL::RccManager::EnableHSI();
-    MCAL::TimManager::InitStopwatch(); 
-    MCAL::UsartManager::InitLogging(); 
-    
-    LOG("--- AC ANALYZER BOOTED ---");
-    MCU::RCC->CSR |= (1 << 24); 
-
-    MCAL::RccManager::EnablePortA();
-    MCAL::RccManager::EnablePortC();
+int main() {
+    MCU::RCC->AHB1ENR |= (1 << 0) | (1 << 2); MCU::GPIOA->MODER &= ~(3UL << 10); MCU::GPIOA->MODER |= (1UL << 10); MCU::GPIOA->BSRR = (1UL << 5); 
+    MCAL::RccManager::EnableHSI(); MCAL::TimManager::InitStopwatch(); MCAL::TimManager::InitDelayTimer(); MCAL::UsartManager::InitLogging(); 
+    LOG("--- FINAL PRO CLONER (HARDWARE TIMED) ---");
     MCAL::SyscfgManager::EnableClock();
-
-    StatusLed::SetMode(MCAL::Mode::Output);
-    UserButton::SetMode(MCAL::Mode::Input); 
-    IrTxPin::SetMode(MCAL::Mode::Alternate); 
-    IrTxPin::SetAlternateFunction(1); 
-    IrTxPin::SetHighSpeed(); 
-    IrRxPin::SetMode(MCAL::Mode::Input); 
-    IrRxPin::SetPullUp(); 
-
-    MCAL::SyscfgManager::RouteExtiLine(0, 0); 
-    MCAL::Exti::ConfigureLine(0, MCAL::Trigger::Both);
-    MCAL::Exti::RegisterCallback(0, OnIrPulseEdge);
-    MCAL::NvicManager::EnableInterrupt(6); 
+    StatusLed::SetMode(MCAL::Mode::Output); VerifyLed::SetMode(MCAL::Mode::Output); UserButton::SetMode(MCAL::Mode::Input); 
+    IrTxPin::SetMode(MCAL::Mode::Alternate); IrTxPin::SetAlternateFunction(1); IrTxPin::SetHighSpeed(); 
+    IrRxPin::SetMode(MCAL::Mode::Input); IrRxPin::SetPullUp(); 
+    MCAL::SyscfgManager::RouteExtiLine(0, 0); MCAL::Exti::ConfigureLine(0, MCAL::Trigger::Both);
+    MCAL::Exti::RegisterCallback(0, OnIrPulseEdge); MCAL::NvicManager::EnableInterrupt(6); 
     MCAL::TimManager::InitPwm38kHz();  
-
-    RTOS::Scheduler::CreateTask(0, 100, &CheckButtonTask); 
-    RTOS::Scheduler::CreateTask(1, 50,  &IdleTimeoutTask); 
-    RTOS::Scheduler::CreateTask(2, 500, &HeartbeatTask);   
+    RTOS::Scheduler::CreateTask(0, 50, &CheckButtonTask); RTOS::Scheduler::CreateTask(1, 50, &IdleTimeoutTask); RTOS::Scheduler::CreateTask(2, 50, &HeartbeatTask);   
     RTOS::Scheduler::Start();
-
-    StatusLed::SetLow();
-    for(;;) { __asm("wfi"); }
+    for(;;) { if (triggerPlayback) { triggerPlayback = false; PlayStoredSignal(nextPlayIsON); nextPlayIsON = !nextPlayIsON; } __asm("wfi"); }
 }
